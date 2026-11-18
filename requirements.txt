@@ -1,0 +1,9 @@
+# Supply Chain Analytics Inventory Decision Agent
+# Core inventory calculation engine runs on Python standard library.
+# Streamlit web interface & CSV data analysis dependencies:
+streamlit>=1.32.0
+pandas>=2.0.0
+
+# Optional extensions for advanced testing and formatted presentation:
+pytest>=8.0.0
+tabulate>=0.9.0
