@@ -22,6 +22,7 @@ import json
 import sys
 from typing import List, Dict, Any
 
+import inventory_tools as it
 from inventory_agent import InventoryDecisionAgent, AgentResponse
 
 
@@ -194,7 +195,8 @@ def is_running_in_streamlit() -> bool:
 def run_streamlit_app():
     """
     Renders the Supply Chain Analytics Inventory Decision Agent Streamlit UI
-    along with the sidebar CSV Data Upload section and pandas-based Data Analysis view.
+    along with the sidebar CSV Data Upload section, existing pandas-based Data Analysis view,
+    and Multicriteria Inventory Classification (A, B, C, D) using Sales ($) and Hits.
     """
     import pandas as pd
     import streamlit as st
@@ -207,8 +209,18 @@ def run_streamlit_app():
 
     agent = InventoryDecisionAgent()
 
+    streamlit_samples = list(DEMO_QUESTIONS) + [
+        {
+            "title": "Case 6: Multicriteria Inventory Classification (A, B, C, D)",
+            "question": (
+                "Perform multicriteria inventory classification on the uploaded CSV file "
+                "using Sales ($) and Hits to classify all inventory items into A, B, C, and D classes."
+            ),
+        }
+    ]
+
     # ------------------------------------------------------------------
-    # LEFT SIDEBAR
+    # LEFT SIDEBAR (SINGLE CSV FILE UPLOADER AT BOTTOM)
     # ------------------------------------------------------------------
     with st.sidebar:
         st.title("📦 Inventory Agent")
@@ -220,13 +232,14 @@ def run_streamlit_app():
             "- **Quantity Discount**\n"
             "- **Safety Stock & Reorder Point**\n"
             "- **Fixed-Period Review**\n"
-            "- **Newsvendor**"
+            "- **Newsvendor**\n"
+            "- **Multicriteria Inventory Classification (A, B, C, D)**"
         )
 
         st.divider()
 
         st.header("Sample Questions")
-        sample_titles = ["Custom Question"] + [c["title"] for c in DEMO_QUESTIONS]
+        sample_titles = ["Custom Question"] + [c["title"] for c in streamlit_samples]
         selected_sample = st.selectbox(
             "Load a sample inventory question",
             options=sample_titles,
@@ -236,6 +249,7 @@ def run_streamlit_app():
         st.divider()
 
         # LAST SECTION AT THE BOTTOM OF THE LEFT SIDEBAR: Data Upload
+        # Single CSV uploader shared across inventory analysis, classification, and agent queries.
         st.header("Data Upload")
         uploaded_file = st.file_uploader(
             "Upload CSV File",
@@ -243,18 +257,29 @@ def run_streamlit_app():
             key="sidebar_csv_uploader",
         )
 
+    # Read the single uploaded CSV into a pandas DataFrame ONCE so every capability shares it
+    uploaded_df = None
+    upload_read_error = None
+    if uploaded_file is not None:
+        try:
+            uploaded_df = pd.read_csv(uploaded_file)
+            uploaded_df.columns = [str(c).strip() for c in uploaded_df.columns]
+        except Exception as exc:
+            upload_read_error = str(exc)
+
     # ------------------------------------------------------------------
     # MAIN STREAMLIT PAGE — EXISTING INVENTORY DECISION AGENT
     # ------------------------------------------------------------------
     st.title("Supply Chain Analytics Inventory Decision Agent")
     st.markdown(
         "Ask natural-language inventory questions across **EOQ**, **Quantity Discount**, "
-        "**Safety Stock & Reorder Point**, **Fixed-Period Review**, and **Newsvendor** models."
+        "**Safety Stock & Reorder Point**, **Fixed-Period Review**, **Newsvendor**, and "
+        "**Multicriteria Inventory Classification (A, B, C, D)**."
     )
 
     default_question = ""
     if selected_sample != "Custom Question":
-        for case in DEMO_QUESTIONS:
+        for case in streamlit_samples:
             if case["title"] == selected_sample:
                 default_question = case["question"]
                 break
@@ -271,7 +296,7 @@ def run_streamlit_app():
             st.warning("Please enter an inventory question before running the agent.")
         else:
             try:
-                response = agent.run(user_question.strip())
+                response = agent.run(user_question.strip(), dataframe=uploaded_df)
                 if response.verification_passed:
                     st.success(response.executive_summary)
                 else:
@@ -283,42 +308,65 @@ def run_streamlit_app():
                     if response.extracted_inputs:
                         for k, v in response.extracted_inputs.items():
                             meaning = f" — *{response.extracted_meanings[k]}*" if k in response.extracted_meanings else ""
-                            st.write(f"- `{k}`: `{v}`{meaning}")
+                            display_v = f"pandas DataFrame ({v.shape[0]} rows x {v.shape[1]} cols)" if k == "df" else v
+                            st.write(f"- `{k}`: `{display_v}`{meaning}")
                     if response.missing_inputs:
                         st.error("Missing required inputs: " + ", ".join(response.missing_inputs))
+
+                if response.model_identified == agent.MODEL_INVENTORY_CLASSIFICATION and response.raw_result is not None:
+                    cls_res = response.raw_result
+                    st.subheader("Final Summary Counts & Total Sales by Class (A, B, C, D)")
+                    st.dataframe(
+                        cls_res.class_summary_df.style.format(
+                            {
+                                "Item Count": "{:,}",
+                                "Item Share (%)": "{:.2f}%",
+                                "Total Sales ($)": "${:,.2f}",
+                                "Sales Share (%)": "{:.2f}%",
+                                "Total Hits": "{:,.0f}",
+                                "Hits Share (%)": "{:.2f}%",
+                            }
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    st.subheader("Classified Inventory DataFrame")
+                    hits_display_col = "Hits" if "Hits" in cls_res.classified_df.columns else "POS Hits"
+                    st.dataframe(
+                        cls_res.classified_df.style.format(
+                            {
+                                "Sales ($)": "${:,.2f}",
+                                hits_display_col: "{:,.0f}",
+                                "Sales Share (%)": "{:.2f}%",
+                                "Cumulative Sales (%)": "{:.2f}%",
+                                "Sales Score": "{:d}",
+                                "Hits Share (%)": "{:.2f}%",
+                                "Cumulative Hits (%)": "{:.2f}%",
+                                "Hits Score": "{:d}",
+                                "Combined Weighted Score": "{:.2f}",
+                            }
+                        ),
+                        use_container_width=True,
+                    )
 
                 st.markdown(response.detailed_explanation)
             except Exception as exc:
                 st.error(f"Error processing inventory question: {exc}")
 
     # ------------------------------------------------------------------
-    # MAIN STREAMLIT PAGE — CSV DATA UPLOAD & ANALYSIS RESULTS
+    # MAIN STREAMLIT PAGE — UPLOADED CSV DATA ANALYSIS & CLASSIFICATION
     # ------------------------------------------------------------------
     if uploaded_file is not None:
         st.divider()
-        st.header("Uploaded CSV Data Analysis")
+        st.header("Uploaded CSV Data Analysis & Classification")
 
-        try:
-            df = pd.read_csv(uploaded_file)
-        except Exception as exc:
-            st.error(f"Failed to read uploaded CSV file: {exc}")
+        if upload_read_error is not None:
+            st.error(f"Failed to read uploaded CSV file: {upload_read_error}")
             return
 
-        # Validate required columns: Product, Category, Units, Unit Cost
-        missing_cols = validate_csv_dataframe(df)
-        if missing_cols:
-            st.error(
-                f"The uploaded CSV file is missing the following required column(s): "
-                f"**{', '.join(missing_cols)}**. "
-                f"Required columns are: {', '.join(REQUIRED_CSV_COLUMNS)}."
-            )
-            st.subheader("Uploaded Dataset Preview")
-            st.dataframe(df, use_container_width=True)
-            st.write(f"**Number of Rows:** {df.shape[0]} | **Number of Columns:** {df.shape[1]}")
-            st.write(f"**Column Names:** {', '.join(list(df.columns))}")
-            return
+        df = uploaded_df
 
-        # Display Uploaded DataFrame & Dataset Metadata
+        # Always show Uploaded DataFrame Preview & Metadata
         st.subheader("Uploaded DataFrame")
         st.dataframe(df, use_container_width=True)
 
@@ -329,47 +377,130 @@ def run_streamlit_app():
             st.metric("Number of Columns", f"{df.shape[1]:,}")
         st.markdown(f"**Column Names:** {', '.join(f'`{col}`' for col in df.columns)}")
 
-        # Perform Pandas Analysis
-        try:
-            results = analyze_csv_dataframe(df)
-        except Exception as exc:
-            st.error(f"Unable to analyze uploaded dataset: {exc}")
+        # Check which supported CSV schemas are satisfied by the uploaded DataFrame
+        missing_analysis_cols = validate_csv_dataframe(df)
+        missing_classification_cols = it.validate_classification_dataframe(df)
+
+        has_analysis_schema = len(missing_analysis_cols) == 0
+        has_classification_schema = len(missing_classification_cols) == 0
+
+        if not has_analysis_schema and not has_classification_schema:
+            st.error(
+                "The uploaded CSV file does not match either supported schema.\n\n"
+                f"- **Inventory Value Analysis** missing column(s): **{', '.join(missing_analysis_cols)}** "
+                f"(Required: {', '.join(REQUIRED_CSV_COLUMNS)})\n"
+                f"- **Multicriteria Inventory Classification (A, B, C, D)** missing column(s): "
+                f"**{', '.join(missing_classification_cols)}** "
+                f"(Required: {', '.join(it.REQUIRED_CLASSIFICATION_COLUMNS)})"
+            )
             return
 
-        # Display Summary Results
-        st.subheader("Inventory Data Analysis Results")
-        kpi1, kpi2, kpi3, kpi4 = st.columns(4)
-        with kpi1:
-            st.metric("Total Units", _format_units(results["total_units"]))
-        with kpi2:
-            st.metric("Average Unit Cost", f"${results['average_unit_cost']:,.2f}")
-        with kpi3:
-            st.metric(
-                "Product with Highest Units",
-                results["highest_units_product"],
-                delta=f"{_format_units(results['highest_units_value'])} units",
-                delta_color="off",
+        # --------------------------------------------------------------
+        # A. EXISTING INVENTORY DATA ANALYSIS (Product, Category, Units, Unit Cost)
+        # --------------------------------------------------------------
+        if has_analysis_schema:
+            st.divider()
+            st.subheader("Inventory Data Analysis Results")
+            try:
+                results = analyze_csv_dataframe(df)
+            except Exception as exc:
+                st.error(f"Unable to analyze uploaded dataset: {exc}")
+            else:
+                kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+                with kpi1:
+                    st.metric("Total Units", _format_units(results["total_units"]))
+                with kpi2:
+                    st.metric("Average Unit Cost", f"${results['average_unit_cost']:,.2f}")
+                with kpi3:
+                    st.metric(
+                        "Product with Highest Units",
+                        results["highest_units_product"],
+                        delta=f"{_format_units(results['highest_units_value'])} units",
+                        delta_color="off",
+                    )
+                with kpi4:
+                    st.metric("Total Inventory Value", f"${results['total_inventory_value']:,.2f}")
+
+                st.subheader("Total Units by Category")
+                st.dataframe(
+                    results["units_by_category"],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                st.subheader("Inventory Data with Calculated Inventory Value")
+                styled_df = results["analysis_df"].style.format(
+                    {
+                        "Unit Cost": "${:,.2f}",
+                        "Inventory Value": "${:,.2f}",
+                    }
+                )
+                st.dataframe(styled_df, use_container_width=True)
+
+        # --------------------------------------------------------------
+        # B. MULTICRITERIA INVENTORY CLASSIFICATION (A, B, C, D) — COURSE METHODOLOGY
+        # --------------------------------------------------------------
+        if has_classification_schema:
+            st.divider()
+            st.subheader("Multicriteria Inventory Classification (A, B, C, D)")
+            st.caption(
+                "Course Methodology: Pareto thresholds **A (0–60%), B (61–80%), C (81–90%), D (91–100%)** → "
+                "Scores **A=4, B=3, C=2, D=1** → **Combined Weighted Score = 0.65(Sales Score) + 0.35(Hits Score)** → "
+                "Final Class **A (4.00–3.25), B (3.24–2.50), C (2.49–1.75), D (< 1.75)**."
             )
-        with kpi4:
-            st.metric("Total Inventory Value", f"${results['total_inventory_value']:,.2f}")
 
-        # Display Total Units by Category
-        st.subheader("Total Units by Category")
-        st.dataframe(
-            results["units_by_category"],
-            use_container_width=True,
-            hide_index=True,
-        )
+            try:
+                cls_result = it.classify_inventory_multicriteria(df)
+            except Exception as exc:
+                st.error(f"Unable to perform inventory classification: {exc}")
+            else:
+                # KPI Summary Row showing Counts & Total Sales ($) for each Final Class (A, B, C, D)
+                c1, c2, c3, c4 = st.columns(4)
+                summary_lookup = cls_result.class_summary_df.set_index("Final Inventory Class")
+                for col_widget, cls_label in zip([c1, c2, c3, c4], ["A", "B", "C", "D"]):
+                    row_s = summary_lookup.loc[cls_label]
+                    with col_widget:
+                        st.metric(
+                            f"Class {cls_label}",
+                            f"{int(row_s['Item Count']):,} items",
+                            delta=f"${row_s['Total Sales ($)']:,.2f} ({row_s['Sales Share (%)']:.1f}% Sales)",
+                            delta_color="off",
+                        )
 
-        # Display DataFrame including the calculated Inventory Value column with currency formatting
-        st.subheader("Inventory Data with Calculated Inventory Value")
-        styled_df = results["analysis_df"].style.format(
-            {
-                "Unit Cost": "${:,.2f}",
-                "Inventory Value": "${:,.2f}",
-            }
-        )
-        st.dataframe(styled_df, use_container_width=True)
+                # Final Summary Counts & Total Sales Table
+                st.subheader("Final Summary Counts & Total Sales by Class (A, B, C, D)")
+                styled_summary = cls_result.class_summary_df.style.format(
+                    {
+                        "Item Count": "{:,}",
+                        "Item Share (%)": "{:.2f}%",
+                        "Total Sales ($)": "${:,.2f}",
+                        "Sales Share (%)": "{:.2f}%",
+                        "Total Hits": "{:,.0f}",
+                        "Hits Share (%)": "{:.2f}%",
+                    }
+                )
+                st.dataframe(styled_summary, use_container_width=True, hide_index=True)
+
+                # Full DataFrame with Course Classification Columns Added
+                st.subheader("Inventory DataFrame with Multicriteria Classification Results")
+                hits_display_col = "Hits" if "Hits" in cls_result.classified_df.columns else "POS Hits"
+                styled_classified = cls_result.classified_df.style.format(
+                    {
+                        "Sales ($)": "${:,.2f}",
+                        hits_display_col: "{:,.0f}",
+                        "Sales Share (%)": "{:.2f}%",
+                        "Cumulative Sales (%)": "{:.2f}%",
+                        "Sales Score": "{:d}",
+                        "Hits Share (%)": "{:.2f}%",
+                        "Cumulative Hits (%)": "{:.2f}%",
+                        "Hits Score": "{:d}",
+                        "Combined Weighted Score": "{:.2f}",
+                    }
+                )
+                st.dataframe(styled_classified, use_container_width=True)
+
+                with st.expander("Student Verification Breakdown (Formulas, Substitutions & Checks)", expanded=False):
+                    st.markdown(cls_result.format_verification_steps())
 
 
 # ==============================================================================

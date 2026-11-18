@@ -207,6 +207,7 @@ class InventoryDecisionAgent:
     MODEL_SAFETY_STOCK_ROP = "safety_stock_rop"
     MODEL_FIXED_PERIOD_REVIEW = "fixed_period_review"
     MODEL_NEWSVENDOR = "newsvendor"
+    MODEL_INVENTORY_CLASSIFICATION = "inventory_classification"
 
     MODEL_NAMES = {
         MODEL_EOQ: "Economic Order Quantity (EOQ)",
@@ -214,6 +215,7 @@ class InventoryDecisionAgent:
         MODEL_SAFETY_STOCK_ROP: "Safety Stock & Reorder Point (Continuous Review)",
         MODEL_FIXED_PERIOD_REVIEW: "Fixed-Period Review (Periodic Review / Order-Up-To)",
         MODEL_NEWSVENDOR: "Newsvendor Model (Single-Period Stochastic)",
+        MODEL_INVENTORY_CLASSIFICATION: "Multicriteria Inventory Classification (A, B, C, D)",
     }
 
     def __init__(self):
@@ -223,6 +225,7 @@ class InventoryDecisionAgent:
             self.MODEL_SAFETY_STOCK_ROP: it.calculate_rop,
             self.MODEL_FIXED_PERIOD_REVIEW: it.calculate_periodic_review,
             self.MODEL_NEWSVENDOR: it.calculate_newsvendor,
+            self.MODEL_INVENTORY_CLASSIFICATION: it.classify_inventory_multicriteria,
         }
 
     # ==========================================================================
@@ -230,12 +233,27 @@ class InventoryDecisionAgent:
     # ==========================================================================
     def identify_model(self, question: str) -> Tuple[str, Dict[str, Any]]:
         """
-        Classifies the customer question into one of the 5 inventory models.
+        Classifies the customer question into one of the supported inventory models,
+        including Multicriteria Inventory Classification (A, B, C, D).
         Returns (model_code, reasoning_dict).
         """
         q_lower = question.lower()
         scores: Dict[str, float] = {k: 0.0 for k in self.MODEL_NAMES}
         reasons: Dict[str, List[str]] = {k: [] for k in self.MODEL_NAMES}
+
+        # 0. Multicriteria Inventory Classification (A, B, C, D) indicators
+        cls_keywords = [
+            ("inventory classification", 14.0), ("multicriteria", 12.0), ("multi-criteria", 12.0),
+            ("abcd classification", 14.0), ("abc classification", 12.0), ("a, b, c, and d", 12.0),
+            ("a, b, c, d", 12.0), ("classify inventory", 12.0), ("classify the inventory", 12.0),
+            ("classify my inventory", 12.0), ("classify items", 10.0), ("classify my uploaded", 12.0),
+            ("sales and hits", 12.0), ("hits and sales", 12.0), ("pareto classification", 10.0),
+            ("abcd classes", 12.0), ("class a, b, c", 10.0), ("hits", 5.0),
+        ]
+        for kw, pts in cls_keywords:
+            if kw in q_lower:
+                scores[self.MODEL_INVENTORY_CLASSIFICATION] += pts
+                reasons[self.MODEL_INVENTORY_CLASSIFICATION].append(kw)
 
         # 1. Newsvendor indicators
         nv_keywords = [
@@ -340,7 +358,8 @@ class InventoryDecisionAgent:
         self,
         model_name: str,
         question: str,
-        input_overrides: Optional[Dict[str, Any]] = None
+        input_overrides: Optional[Dict[str, Any]] = None,
+        dataframe: Any = None,
     ) -> Tuple[Dict[str, Any], Dict[str, str], List[str]]:
         """
         Examines the entire question to extract numerical values and their semantic meanings.
@@ -943,6 +962,33 @@ class InventoryDecisionAgent:
             if ("demand_mean" not in inputs or "demand_std" not in inputs) and "uniform_range" not in inputs and "discrete_demand" not in inputs:
                 missing.append("demand distribution (Mean and standard deviation of demand)")
 
+        # ----------------------------------------------------------------------
+        # MODEL 6: MULTICRITERIA INVENTORY CLASSIFICATION (A, B, C, D)
+        # ----------------------------------------------------------------------
+        elif model_name == self.MODEL_INVENTORY_CLASSIFICATION:
+            df_obj = inputs.get("df", dataframe)
+            if df_obj is None:
+                missing.append(
+                    "uploaded CSV DataFrame with columns: Item Number, Item Name, UoM, Sales ($), Hits"
+                )
+            else:
+                missing_cols = it.validate_classification_dataframe(df_obj)
+                if missing_cols:
+                    missing.append(
+                        f"required CSV columns missing from uploaded DataFrame: {', '.join(missing_cols)}"
+                    )
+                else:
+                    inputs["df"] = df_obj
+                    row_cnt = len(df_obj) if hasattr(df_obj, "__len__") else "unknown"
+                    meanings["df"] = f"Uploaded pandas DataFrame ({row_cnt} rows)"
+
+            if "sales_weight" not in inputs:
+                inputs["sales_weight"] = 0.65
+                meanings["sales_weight"] = "Course methodology weight for Sales ($) (65%)"
+            if "hits_weight" not in inputs:
+                inputs["hits_weight"] = 0.35
+                meanings["hits_weight"] = "Course methodology weight for POS Hits (35%)"
+
         return inputs, meanings, missing
 
     # ==========================================================================
@@ -1021,6 +1067,16 @@ class InventoryDecisionAgent:
                 notes.append(f"✅ Economic feasibility confirmed: Expected single-period profit = ${result.expected_profit:,.2f}.")
             notes.append(f"✅ Marginal revenue vs cost balance satisfied: CR = {result.critical_ratio*100:.2f}%.")
 
+        elif model_name == self.MODEL_INVENTORY_CLASSIFICATION:
+            if result.total_items <= 0:
+                notes.append("❌ Verification Failure: No inventory items were classified.")
+                passed = False
+            else:
+                notes.append(
+                    f"✅ Classified {result.total_items:,} SKUs into A ({result.class_counts['A']}), "
+                    f"B ({result.class_counts['B']}), C ({result.class_counts['C']}), D ({result.class_counts['D']})."
+                )
+
         return passed, notes
 
     # ==========================================================================
@@ -1083,6 +1139,17 @@ class InventoryDecisionAgent:
                 f"**{fa['critical_ratio']*100:.2f}%** (Cu = ${fa['underage_cost']:,.2f}, Co = ${fa['overage_cost']:,.2f}), "
                 f"yielding an expected profit of **${fa['expected_profit']:,.2f}**."
             )
+
+        # 6. MULTICRITERIA INVENTORY CLASSIFICATION (A, B, C, D)
+        elif model_name == self.MODEL_INVENTORY_CLASSIFICATION:
+            exec_summary = (
+                f"**Classification Complete:** Classified **{fa['total_items_classified']:,} SKUs** "
+                f"(Total Sales: **${fa['total_sales']:,.2f}**, Total Hits: **{fa['total_hits']:,.0f}**) — "
+                f"**Class A**: {fa['class_A_items']:,} items (${fa['class_A_sales']:,.2f}) | "
+                f"**Class B**: {fa['class_B_items']:,} items (${fa['class_B_sales']:,.2f}) | "
+                f"**Class C**: {fa['class_C_items']:,} items (${fa['class_C_sales']:,.2f}) | "
+                f"**Class D**: {fa['class_D_items']:,} items (${fa['class_D_sales']:,.2f})."
+            )
         else:
             exec_summary = "Calculation completed successfully."
 
@@ -1097,7 +1164,8 @@ class InventoryDecisionAgent:
         self,
         question: str,
         model_override: Optional[str] = None,
-        input_overrides: Optional[Dict[str, Any]] = None
+        input_overrides: Optional[Dict[str, Any]] = None,
+        dataframe: Any = None,
     ) -> AgentResponse:
         """
         Executes the full Supply Chain Analytics Decision Pipeline:
@@ -1124,13 +1192,16 @@ class InventoryDecisionAgent:
 
         # Step 2: Extract Inputs (Exhaustive Synonym & Context Parsing)
         extracted_inputs, extracted_meanings, missing_params = self.extract_inputs(
-            model_code, question, input_overrides
+            model_code, question, input_overrides, dataframe=dataframe
         )
         trace.append(AgentStepLog(
             step_name="Extract Inputs",
             status="SUCCESS" if not missing_params else "MISSING_PARAMETERS",
             details={
-                "extracted_inputs": {k: str(v) for k, v in extracted_inputs.items()},
+                "extracted_inputs": {
+                    k: (f"<DataFrame shape={getattr(v, 'shape', 'unknown')}>" if k == "df" else str(v))
+                    for k, v in extracted_inputs.items()
+                },
                 "extracted_meanings": extracted_meanings,
                 "missing_parameters": missing_params,
             }

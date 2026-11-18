@@ -1671,3 +1671,458 @@ def calculate_newsvendor(
         recommended_order_quantity=q_star,
         is_valid=True,
     )
+
+
+# ==============================================================================
+# 6. MULTICRITERIA INVENTORY CLASSIFICATION (A, B, C, D) — COURSE METHODOLOGY
+# ==============================================================================
+
+REQUIRED_CLASSIFICATION_COLUMNS = [
+    "Item Number",
+    "Item Name",
+    "UoM",
+    "Sales ($)",
+    "Hits",
+]
+
+CLASS_TO_SCORE = {"A": 4, "B": 3, "C": 2, "D": 1}
+
+
+def _resolve_hits_column(df: Any) -> Optional[str]:
+    """Resolves whether the uploaded DataFrame names the hits column 'Hits' or 'POS Hits'."""
+    if df is None or not hasattr(df, "columns"):
+        return None
+    if "Hits" in df.columns:
+        return "Hits"
+    if "POS Hits" in df.columns:
+        return "POS Hits"
+    return None
+
+
+def validate_classification_dataframe(df: Any) -> List[str]:
+    """
+    Validates that the required inventory classification columns are present
+    in the uploaded pandas DataFrame:
+      - Item Number
+      - Item Name
+      - UoM
+      - Sales ($)
+      - Hits (or POS Hits)
+    Returns a list of missing column names (empty if all required columns exist).
+    """
+    if df is None or not hasattr(df, "columns"):
+        return list(REQUIRED_CLASSIFICATION_COLUMNS)
+    base_required = ["Item Number", "Item Name", "UoM", "Sales ($)"]
+    missing = [col for col in base_required if col not in df.columns]
+    if _resolve_hits_column(df) is None:
+        missing.append("Hits")
+    return missing
+
+
+def assign_pareto_class_from_cumulative(cumulative_pct: float, value: float = 1.0) -> str:
+    """
+    Step 1 Course Pareto Classification Thresholds:
+      - Class A: Cumulative 0–60% (<= 60.0%)
+      - Class B: Cumulative 61–80% (> 60.0% and <= 80.0%)
+      - Class C: Cumulative 81–90% (> 80.0% and <= 90.0%)
+      - Class D: Cumulative 91–100% (> 90.0% or zero activity)
+    """
+    if value <= 0:
+        return "D"
+    if cumulative_pct <= 60.0 + 1e-9:
+        return "A"
+    if cumulative_pct <= 80.0 + 1e-9:
+        return "B"
+    if cumulative_pct <= 90.0 + 1e-9:
+        return "C"
+    return "D"
+
+
+def score_from_pareto_class(pareto_class: str) -> int:
+    """Converts Pareto class letter to course numerical score: A=4, B=3, C=2, D=1."""
+    key = str(pareto_class).strip().upper()
+    if key not in CLASS_TO_SCORE:
+        raise ValueError(f"Invalid Pareto class '{pareto_class}'. Expected one of A, B, C, D.")
+    return CLASS_TO_SCORE[key]
+
+
+def compute_combined_weighted_score(
+    sales_score: float,
+    hits_score: float,
+    sales_weight: float = 0.65,
+    hits_weight: float = 0.35,
+) -> float:
+    """
+    Step 2 Course Formula:
+      Combined Weighted Score = 0.65 * (Sales Score) + 0.35 * (Hits Score)
+    """
+    return round((sales_weight * float(sales_score)) + (hits_weight * float(hits_score)), 2)
+
+
+def assign_final_inventory_class(combined_score: float) -> str:
+    """
+    Step 3 Course Final Inventory Classification Thresholds:
+      - Class A: 4.00 – 3.25 (>= 3.25)
+      - Class B: 3.24 – 2.50 (2.50 <= score < 3.25)
+      - Class C: 2.49 – 1.75 (1.75 <= score < 2.50)
+      - Class D: < 1.75
+    """
+    score = round(float(combined_score), 2)
+    if score >= 3.25:
+        return "A"
+    if score >= 2.50:
+        return "B"
+    if score >= 1.75:
+        return "C"
+    return "D"
+
+
+@dataclass
+class InventoryClassificationResult:
+    # Core metadata & outputs
+    method: str
+    sales_weight: float
+    hits_weight: float
+    total_items: int
+    total_sales: float
+    total_hits: float
+    class_counts: Dict[str, int]
+    class_sales: Dict[str, float]
+    classified_df: Any
+    class_summary_df: Any
+
+    # 8 Required Student-Verifiable Sections
+    inputs_extracted: Dict[str, Any]
+    variable_definitions: Dict[str, str]
+    formula: Dict[str, str]
+    formula_with_substituted_values: Dict[str, str]
+    intermediate_calculations: Dict[str, Any]
+    final_answer: Dict[str, Any]
+    verification_checks: List[str]
+    assumptions: List[str]
+    is_valid: bool
+
+    @property
+    def verification_notes(self) -> List[str]:
+        return self.verification_checks
+
+    def format_verification_steps(self) -> str:
+        return _render_student_verification_markdown(
+            self, "Multicriteria Inventory Classification (Course Methodology: A, B, C, D)"
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "model": "InventoryClassification_ABCD",
+            "inputs_extracted": self.inputs_extracted,
+            "variable_definitions": self.variable_definitions,
+            "formula": self.formula,
+            "formula_with_substituted_values": self.formula_with_substituted_values,
+            "intermediate_calculations": self.intermediate_calculations,
+            "final_answer": self.final_answer,
+            "verification_checks": self.verification_checks,
+            "assumptions": self.assumptions,
+            "class_counts": self.class_counts,
+            "class_sales": self.class_sales,
+            "is_valid": self.is_valid,
+        }
+
+
+def classify_inventory_multicriteria(
+    df: Any,
+    sales_weight: float = 0.65,
+    hits_weight: float = 0.35,
+    method: str = "course_weighted_pareto",
+) -> InventoryClassificationResult:
+    """
+    Performs deterministic multicriteria inventory classification (A, B, C, D)
+    using Python and pandas according to the exact course methodology:
+
+      Step 1 — Classify Sales ($) and POS Hits separately using Pareto cumulative cutoffs:
+        - Class A: Cumulative 0–60% (<= 60%)
+        - Class B: Cumulative 61–80% (> 60% and <= 80%)
+        - Class C: Cumulative 81–90% (> 80% and <= 90%)
+        - Class D: Cumulative 91–100% (> 90% or zero activity)
+        Convert each class to numerical scores: A = 4, B = 3, C = 2, D = 1.
+
+      Step 2 — Calculate Combined Weighted Score:
+        Combined Weighted Score = 0.65 * (Sales Score) + 0.35 * (Hits Score)
+
+      Step 3 — Assign Final Inventory Class:
+        - Class A: 4.00 – 3.25
+        - Class B: 3.24 – 2.50
+        - Class C: 2.49 – 1.75
+        - Class D: < 1.75
+
+    Returns an InventoryClassificationResult containing the augmented DataFrame,
+    class summary DataFrame (counts & total sales per class), and all 8 student-verifiable sections.
+    """
+    import pandas as pd
+
+    # Strict Input Validation
+    if df is None:
+        raise ValueError("Missing required input: uploaded pandas DataFrame 'df' must be provided.")
+    missing_cols = validate_classification_dataframe(df)
+    if missing_cols:
+        raise ValueError(
+            f"Uploaded DataFrame is missing required classification column(s): {', '.join(missing_cols)}."
+        )
+    if df.empty:
+        raise ValueError("Uploaded DataFrame contains no inventory rows to classify.")
+    if sales_weight < 0 or hits_weight < 0 or not math.isclose(sales_weight + hits_weight, 1.0, rel_tol=1e-4, abs_tol=1e-4):
+        raise ValueError(f"sales_weight ({sales_weight}) and hits_weight ({hits_weight}) must be non-negative and sum to 1.0.")
+
+    hits_col = _resolve_hits_column(df)
+    work_df = df.copy()
+
+    # Clean numeric Sales ($) and POS Hits strictly using pandas
+    sales_numeric = pd.to_numeric(
+        work_df["Sales ($)"].astype(str).str.replace("$", "", regex=False).str.replace(",", "", regex=False).str.strip(),
+        errors="coerce",
+    )
+    hits_numeric = pd.to_numeric(
+        work_df[hits_col].astype(str).str.replace(",", "", regex=False).str.strip(),
+        errors="coerce",
+    )
+    if sales_numeric.isna().any():
+        raise ValueError("Column 'Sales ($)' contains missing or non-numeric values.")
+    if hits_numeric.isna().any():
+        raise ValueError(f"Column '{hits_col}' contains missing or non-numeric values.")
+    if (sales_numeric < 0).any():
+        raise ValueError("Column 'Sales ($)' cannot contain negative values.")
+    if (hits_numeric < 0).any():
+        raise ValueError(f"Column '{hits_col}' cannot contain negative values.")
+
+    work_df["Sales ($)"] = sales_numeric
+    work_df[hits_col] = hits_numeric
+
+    total_items = int(len(work_df))
+    total_sales = float(work_df["Sales ($)"].sum())
+    total_hits = float(work_df[hits_col].sum())
+
+    # ------------------------------------------------------------------
+    # STEP 1: Classify Sales ($) and POS Hits Separately via Pareto Thresholds
+    #   A: 0-60% | B: 61-80% | C: 81-90% | D: 91-100%
+    # ------------------------------------------------------------------
+    sales_sorted = work_df.sort_values(by="Sales ($)", ascending=False, kind="mergesort")
+    sales_share = (
+        (sales_sorted["Sales ($)"] / total_sales) * 100.0
+        if total_sales > 0
+        else pd.Series(0.0, index=sales_sorted.index)
+    )
+    cum_sales = sales_share.cumsum()
+
+    sales_class = pd.Series("D", index=sales_sorted.index)
+    sales_class[cum_sales <= 90.0 + 1e-9] = "C"
+    sales_class[cum_sales <= 80.0 + 1e-9] = "B"
+    sales_class[cum_sales <= 60.0 + 1e-9] = "A"
+    sales_class[sales_sorted["Sales ($)"] <= 0] = "D"
+
+    hits_sorted = work_df.sort_values(by=hits_col, ascending=False, kind="mergesort")
+    hits_share = (
+        (hits_sorted[hits_col] / total_hits) * 100.0
+        if total_hits > 0
+        else pd.Series(0.0, index=hits_sorted.index)
+    )
+    cum_hits = hits_share.cumsum()
+
+    hits_class = pd.Series("D", index=hits_sorted.index)
+    hits_class[cum_hits <= 90.0 + 1e-9] = "C"
+    hits_class[cum_hits <= 80.0 + 1e-9] = "B"
+    hits_class[cum_hits <= 60.0 + 1e-9] = "A"
+    hits_class[hits_sorted[hits_col] <= 0] = "D"
+
+    # Realign Step 1 results onto work_df and convert classes to numerical scores (A=4, B=3, C=2, D=1)
+    work_df["Sales Share (%)"] = sales_share.reindex(work_df.index).round(2)
+    work_df["Cumulative Sales (%)"] = cum_sales.reindex(work_df.index).round(2)
+    work_df["Sales Class"] = sales_class.reindex(work_df.index)
+    work_df["Sales Score"] = work_df["Sales Class"].map(CLASS_TO_SCORE).astype(int)
+
+    work_df["Hits Share (%)"] = hits_share.reindex(work_df.index).round(2)
+    work_df["Cumulative Hits (%)"] = cum_hits.reindex(work_df.index).round(2)
+    work_df["Hits Class"] = hits_class.reindex(work_df.index)
+    work_df["Hits Score"] = work_df["Hits Class"].map(CLASS_TO_SCORE).astype(int)
+
+    # ------------------------------------------------------------------
+    # STEP 2: Calculate Combined Weighted Score = 0.65(Sales Score) + 0.35(Hits Score)
+    # ------------------------------------------------------------------
+    combined_score = (
+        (float(sales_weight) * work_df["Sales Score"]) + (float(hits_weight) * work_df["Hits Score"])
+    ).round(2)
+    work_df["Combined Weighted Score"] = combined_score
+
+    # ------------------------------------------------------------------
+    # STEP 3: Assign Final Inventory Class
+    #   A: 4.00-3.25 | B: 3.24-2.50 | C: 2.49-1.75 | D: < 1.75
+    # ------------------------------------------------------------------
+    final_class = pd.Series("D", index=work_df.index)
+    final_class[combined_score >= 1.75 - 1e-9] = "C"
+    final_class[combined_score >= 2.50 - 1e-9] = "B"
+    final_class[combined_score >= 3.25 - 1e-9] = "A"
+    work_df["Final Inventory Class"] = final_class
+
+    # Sort classified DataFrame by Combined Weighted Score descending, then Sales ($) descending
+    classified_df = work_df.sort_values(
+        by=["Combined Weighted Score", "Sales ($)"],
+        ascending=[False, False],
+        kind="mergesort",
+    ).reset_index(drop=True)
+
+    # Build Final Summary DataFrame grouped by Final Inventory Class across A, B, C, D
+    grouped = classified_df.groupby("Final Inventory Class", as_index=True).agg(
+        **{
+            "Item Count": ("Item Number", "count"),
+            "Total Sales ($)": ("Sales ($)", "sum"),
+            "Total Hits": (hits_col, "sum"),
+        }
+    )
+    summary_df = grouped.reindex(["A", "B", "C", "D"], fill_value=0).reset_index()
+    summary_df["Item Share (%)"] = (
+        (summary_df["Item Count"] / total_items) * 100.0 if total_items > 0 else 0.0
+    ).round(2)
+    summary_df["Sales Share (%)"] = (
+        (summary_df["Total Sales ($)"] / total_sales) * 100.0 if total_sales > 0 else 0.0
+    ).round(2)
+    summary_df["Hits Share (%)"] = (
+        (summary_df["Total Hits"] / total_hits) * 100.0 if total_hits > 0 else 0.0
+    ).round(2)
+    summary_df = summary_df[
+        [
+            "Final Inventory Class",
+            "Item Count",
+            "Item Share (%)",
+            "Total Sales ($)",
+            "Sales Share (%)",
+            "Total Hits",
+            "Hits Share (%)",
+        ]
+    ]
+
+    class_counts = {
+        cls: int(summary_df.loc[summary_df["Final Inventory Class"] == cls, "Item Count"].iloc[0])
+        for cls in ["A", "B", "C", "D"]
+    }
+    class_sales = {
+        cls: round(float(summary_df.loc[summary_df["Final Inventory Class"] == cls, "Total Sales ($)"].iloc[0]), 2)
+        for cls in ["A", "B", "C", "D"]
+    }
+
+    # Build the 8 Required Student-Verifiable Sections
+    inputs_extracted = {
+        "total_items": total_items,
+        "columns_used": ["Item Number", "Item Name", "UoM", "Sales ($)", hits_col],
+        "total_sales": round(total_sales, 2),
+        "total_hits": round(total_hits, 2),
+        "sales_weight": sales_weight,
+        "hits_weight": hits_weight,
+        "pareto_thresholds": "A: 0-60%, B: 61-80%, C: 81-90%, D: 91-100%",
+        "score_scale": "A=4, B=3, C=2, D=1",
+        "final_class_cutoffs": "A: 4.00-3.25, B: 3.24-2.50, C: 2.49-1.75, D: < 1.75",
+    }
+
+    variable_definitions = {
+        "Sales ($)": "Dollar sales per SKU ($)",
+        hits_col: "POS Hits / order frequency per SKU",
+        "Sales Class": "Individual Pareto class on Sales ($): A (0-60%), B (61-80%), C (81-90%), D (91-100%)",
+        "Hits Class": "Individual Pareto class on POS Hits: A (0-60%), B (61-80%), C (81-90%), D (91-100%)",
+        "Sales Score": "Numerical score for Sales Class (A=4, B=3, C=2, D=1)",
+        "Hits Score": "Numerical score for Hits Class (A=4, B=3, C=2, D=1)",
+        "Combined Weighted Score": "0.65 * (Sales Score) + 0.35 * (Hits Score)",
+        "Final Inventory Class": "Final ABCD tier: A (4.00-3.25), B (3.24-2.50), C (2.49-1.75), D (< 1.75)",
+    }
+
+    formula = {
+        "step_1_pareto_ranking": "Sort descending separately on Sales ($) and POS Hits -> Cumulative % -> A (0-60%), B (61-80%), C (81-90%), D (91-100%)",
+        "step_1_score_conversion": "A = 4, B = 3, C = 2, D = 1",
+        "step_2_combined_weighted_score": "Combined Weighted Score = 0.65 * (Sales Score) + 0.35 * (Hits Score)",
+        "step_3_final_inventory_class": "A: 4.00-3.25 | B: 3.24-2.50 | C: 2.49-1.75 | D: < 1.75",
+    }
+
+    top_row = classified_df.iloc[0]
+    formula_with_substituted_values = {
+        "dataset_totals": f"Total Sales = ${total_sales:,.2f}, Total Hits = {total_hits:,.0f}, Total SKUs = {total_items:,}",
+        "example_top_sku_calculation": (
+            f"SKU '{top_row['Item Number']}' ({top_row['Item Name']}): "
+            f"Sales Class {top_row['Sales Class']} (Score={int(top_row['Sales Score'])}), "
+            f"Hits Class {top_row['Hits Class']} (Score={int(top_row['Hits Score'])}) -> "
+            f"{sales_weight:.2f}({int(top_row['Sales Score'])}) + {hits_weight:.2f}({int(top_row['Hits Score'])}) = "
+            f"{top_row['Combined Weighted Score']:.2f} -> Final Class {top_row['Final Inventory Class']}"
+        ),
+        "final_class_distribution": (
+            f"Class A: {class_counts['A']} items (${class_sales['A']:,.2f}) | "
+            f"Class B: {class_counts['B']} items (${class_sales['B']:,.2f}) | "
+            f"Class C: {class_counts['C']} items (${class_sales['C']:,.2f}) | "
+            f"Class D: {class_counts['D']} items (${class_sales['D']:,.2f})"
+        ),
+    }
+
+    intermediate_calculations = {
+        "class_summary": summary_df.to_dict(orient="records"),
+        "total_sales": round(total_sales, 2),
+        "total_hits": round(total_hits, 2),
+        "total_items": total_items,
+    }
+
+    final_answer = {
+        "total_items_classified": total_items,
+        "class_A_items": class_counts["A"],
+        "class_A_sales": class_sales["A"],
+        "class_B_items": class_counts["B"],
+        "class_B_sales": class_sales["B"],
+        "class_C_items": class_counts["C"],
+        "class_C_sales": class_sales["C"],
+        "class_D_items": class_counts["D"],
+        "class_D_sales": class_sales["D"],
+        "total_sales": round(total_sales, 2),
+        "total_hits": round(total_hits, 2),
+    }
+
+    # Verification Checks
+    sum_classified_items = int(summary_df["Item Count"].sum())
+    sum_classified_sales = float(summary_df["Total Sales ($)"].sum())
+    sum_classified_hits = float(summary_df["Total Hits"].sum())
+    valid_labels = set(classified_df["Final Inventory Class"].unique()).issubset({"A", "B", "C", "D"})
+    score_bounds_ok = bool((classified_df["Combined Weighted Score"] >= 1.0).all() and (classified_df["Combined Weighted Score"] <= 4.0).all())
+
+    verification_checks = [
+        f"PASS: Item conservation verified ({sum_classified_items:,} classified == {total_items:,} uploaded SKUs)."
+        if sum_classified_items == total_items else "WARN: Classified item count mismatch.",
+        f"PASS: Sales conservation verified (${sum_classified_sales:,.2f} == ${total_sales:,.2f})."
+        if abs(sum_classified_sales - total_sales) < 0.01 else "WARN: Sales sum mismatch.",
+        f"PASS: Hits conservation verified ({sum_classified_hits:,.0f} == {total_hits:,.0f})."
+        if abs(sum_classified_hits - total_hits) < 0.01 else "WARN: Hits sum mismatch.",
+        "PASS: All Combined Weighted Scores lie within valid course range [1.00, 4.00]."
+        if score_bounds_ok else "WARN: Combined Weighted Score outside [1.00, 4.00].",
+        "PASS: All assigned Final Inventory Classes strictly belong to {A, B, C, D}."
+        if valid_labels else "WARN: Unexpected class label detected.",
+    ]
+
+    assumptions = [
+        "Sales ($) and POS Hits are ranked independently using cumulative Pareto thresholds: A (0-60%), B (61-80%), C (81-90%), D (91-100%).",
+        "Each Pareto class converts to an ordinal score: A=4, B=3, C=2, D=1.",
+        "Sales receives 65% weight and POS Hits receives 35% weight in the Combined Weighted Score.",
+        "Final Inventory Class thresholds follow course rules: A (4.00-3.25), B (3.24-2.50), C (2.49-1.75), D (< 1.75).",
+        "Zero-sales or zero-hits SKUs are assigned Class D (score 1) for that criterion.",
+    ]
+
+    return InventoryClassificationResult(
+        method="course_weighted_pareto",
+        sales_weight=float(sales_weight),
+        hits_weight=float(hits_weight),
+        total_items=total_items,
+        total_sales=total_sales,
+        total_hits=total_hits,
+        class_counts=class_counts,
+        class_sales=class_sales,
+        classified_df=classified_df,
+        class_summary_df=summary_df,
+        inputs_extracted=inputs_extracted,
+        variable_definitions=variable_definitions,
+        formula=formula,
+        formula_with_substituted_values=formula_with_substituted_values,
+        intermediate_calculations=intermediate_calculations,
+        final_answer=final_answer,
+        verification_checks=verification_checks,
+        assumptions=assumptions,
+        is_valid=True,
+    )
